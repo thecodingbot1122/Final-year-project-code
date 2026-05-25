@@ -1,0 +1,453 @@
+#include <Arduino.h>
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include "esp_http_server.h"
+#include "board_config.h"
+
+// ===========================
+// WiFi Access Point (Hotspot) Credentials
+// ===========================
+const char *ssid = "ESP32_Robot";   // Aapke Robot ke WiFi ka naam
+const char *password = "12345678";  // Password (kam az kam 8 characters)
+
+// ===========================
+// Web Servers
+// ===========================
+WebServer server(80); // Port 80 for the HTML UI and Commands
+extern httpd_handle_t stream_httpd; // Port 81 for the Video Stream
+
+// ===========================
+// Embedded HTML Dashboard
+// ===========================
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard</title>
+  <style>
+    :root {
+      --primary: #0078d7; --primary-hover: #005a9e; --bg-dark: #121212;
+      --card-bg: #1e1e1e; --text-light: #f0f0f0; --accent: #ff9800;
+      --accent-hover: #e68900; --danger: #d32f2f;
+    }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background-color: var(--bg-dark); color: var(--text-light); text-align: center; margin: 0; padding: 0; }
+    h2, h3 { color: var(--text-light); font-weight: 500; }
+    .hidden { display: none !important; }
+    .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+    .card { background: var(--card-bg); border-radius: 12px; padding: 20px; box-shadow: 0 8px 32px rgba(0,0,0,0.3); margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.05); }
+    button { margin: 8px; padding: 12px 24px; border: none; border-radius: 8px; background: var(--primary); color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; user-select: none; -webkit-tap-highlight-color: transparent; }
+    button:hover { background: var(--primary-hover); transform: translateY(-2px); }
+    button:active { transform: translateY(1px); }
+    .btn-danger { background: var(--danger); }
+    .btn-danger:hover { background: #b71c1c; }
+    .stream-container { width: 100%; max-width: 600px; margin: 15px auto; border-radius: 12px; overflow: hidden; border: 2px solid rgba(255,255,255,0.1); background: #000; }
+    .stream-container img { width: 100%; height: auto; display: block; }
+    .movement-grid { display: grid; grid-template-columns: repeat(3, 80px); grid-template-rows: repeat(3, 80px); gap: 10px; justify-content: center; margin: 20px auto; }
+    .movement-grid button { margin: 0; padding: 0; font-size: 24px; }
+    .forward { grid-column: 2; grid-row: 1; } .left { grid-column: 1; grid-row: 2; } .right { grid-column: 3; grid-row: 2; } .backward{ grid-column: 2; grid-row: 3; }
+    .slider-container { text-align: left; }
+    .slider-group { background: rgba(255,255,255,0.03); padding: 12px 15px; border-radius: 8px; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+    .slider-group label { font-weight: 600; width: 80px; }
+    input[type=range] { flex-grow: 1; margin: 0 15px; accent-color: var(--primary); }
+    .slider-val { width: 40px; text-align: right; font-family: monospace; color: var(--accent); }
+    .gps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; }
+    .gps-card { background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
+    .gps-card input { padding: 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.2); color: #fff; font-family: monospace; }
+    .gps-card button { background: var(--accent); margin: 0; }
+    .gps-card button:hover { background: var(--accent-hover); }
+    #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 12px 24px; border-radius: 30px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 1000; }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="root" class="card">
+      <h2>Land Mine Detection - Robotic Manipulator</h2>
+      <p style="color: #aaa; margin-bottom: 30px;">Select operating mode to begin</p>
+      <button onclick="showSection('auto')"> Automatic Mode</button>
+      <button onclick="showSection('manual')"> Manual Mode</button>
+    </div>
+
+    <div id="auto" class="card hidden">
+      <h2>Automatic Navigation</h2>
+      <div>
+        <button onclick="sendCommand('/auto/start')">▶ Start</button>
+        <button class="btn-danger" onclick="sendCommand('/auto/stop')">⏹ Stop</button>
+        <button onclick="sendTestSignal()" style="background: #607d8b;">🧪 Test System</button>
+      </div>
+      <div class="stream-container">
+        <img class="vid-stream" src="" alt="Stream Not Connected">
+      </div>
+      <h3>Waypoint Configuration</h3>
+      <div class="gps-grid">
+        <script>
+          for(let i=1; i<=4; i++) {
+            document.write(`
+              <div class="gps-card">
+                <strong>Point ${i}</strong>
+                <input id="lat${i}" type="number" step="any" placeholder="Latitude">
+                <input id="lon${i}" type="number" step="any" placeholder="Longitude">
+                <button onclick="saveGPS(${i})">Save Waypoint</button>
+              </div>
+            `);
+          }
+        </script>
+      </div>
+      <br><button onclick="goBack()" style="background: #555;">← Back to Menu</button>
+    </div>
+
+    <div id="manual" class="card hidden">
+      <h2>Manual Control</h2>
+      <div class="stream-container">
+        <img class="vid-stream" src="" alt="Stream Not Connected">
+      </div>
+      <h3>Chassis Control</h3>
+      <div class="movement-grid">
+        <button class="forward" onmousedown="startMove('forward')" onmouseup="stopMove()" ontouchstart="startMove('forward')" ontouchend="stopMove()">▲</button>
+        <button class="left" onmousedown="startMove('left')" onmouseup="stopMove()" ontouchstart="startMove('left')" ontouchend="stopMove()">◀</button>
+        <button class="right" onmousedown="startMove('right')" onmouseup="stopMove()" ontouchstart="startMove('right')" ontouchend="stopMove()">▶</button>
+        <button class="backward" onmousedown="startMove('backward')" onmouseup="stopMove()" ontouchstart="startMove('backward')" ontouchend="stopMove()">▼</button>
+      </div>
+      <h3>Manipulator Arm</h3>
+      <div class="slider-container">
+        <div class="slider-group">
+          <label>Servo 0</label>
+          <input type="range" min="80" max="150" value="140" oninput="handleServoInput(0, this.value)">
+          <span id="val0" class="slider-val">140°</span>
+        </div>
+        <div class="slider-group">
+          <label>Servo 1</label>
+          <input type="range" min="0" max="150" value="60" oninput="handleServoInput(1, this.value)">
+          <span id="val1" class="slider-val">60°</span>
+        </div>
+        <div class="slider-group">
+          <label>Servo 2</label>
+          <input type="range" min="0" max="120" value="120" oninput="handleServoInput(2, this.value)">
+          <span id="val2" class="slider-val">120°</span>
+        </div>
+        <div class="slider-group">
+          <label>Servo 3</label>
+          <input type="range" min="0" max="100" value="40" oninput="handleServoInput(3, this.value)">
+          <span id="val3" class="slider-val">40°</span>
+        </div>
+        <div class="slider-group">
+          <label>Servo 4</label>
+          <input type="range" min="0" max="120" value="70" oninput="handleServoInput(4, this.value)">
+          <span id="val4" class="slider-val">70°</span>
+        </div>
+        <div class="slider-group">
+          <label>Servo 5</label>
+          <input type="range" min="40" max="150" value="90" oninput="handleServoInput(5, this.value)">
+          <span id="val5" class="slider-val">90°</span>
+        </div>
+      </div>
+      
+      <h3>Metal Detector</h3>
+      <button class="startscan" onclick="startScan()">Start Scan</button>
+      
+      <br><button onclick="goBack()" style="background: #555;">← Back to Menu</button>
+    </div>
+  </div>
+  
+  <div id="toast">Message</div>
+
+  <script>
+    window.onload = () => {
+      let streamUrl = `http://${window.location.hostname}:81/stream`;
+      document.querySelectorAll('.vid-stream').forEach(img => img.src = streamUrl);
+    };
+
+    function showSection(sectionId) {
+      document.getElementById("root").classList.add("hidden");
+      document.getElementById("auto").classList.add("hidden");
+      document.getElementById("manual").classList.add("hidden");
+      document.getElementById(sectionId).classList.remove("hidden");
+      sendCommand('/' + sectionId); 
+    }
+    
+    function goBack() { 
+      document.getElementById("root").classList.remove("hidden");
+      document.getElementById("auto").classList.add("hidden");
+      document.getElementById("manual").classList.add("hidden");
+    }
+    
+    function sendCommand(path) {
+      fetch(path)
+        .then(response => { if(!response.ok) throw new Error("Network error"); })
+        .catch(err => showToast("Failed to connect to ESP32"));
+    }
+
+    // NEW TEST SIGNAL FUNCTION
+    function sendTestSignal() {
+      fetch('/auto/test')
+        .then(response => { if(response.ok) { showToast("Test Signal 'T' Sent!"); } })
+        .catch(err => showToast("Test Failed"));
+    }
+    
+    function startMove(dir) { sendCommand(`/manual/${dir}`); }
+    function stopMove() { sendCommand(`/manual/stop`); }
+    function updateUI(id, value) { document.getElementById(`val${id}`).innerText = value + '°'; }
+    
+    function startScan() {
+      fetch('/start-scan')
+        .then(response => { if(response.ok) { showToast("Scan Started!"); } })
+        .catch(err => showToast("Failed to start scan"));
+    }
+
+    let lastSendTime = {};
+    function handleServoInput(id, value) {
+      updateUI(id, value);
+      let now = Date.now();
+      if (!lastSendTime[id] || now - lastSendTime[id] > 50) {
+        sendServoCommand(id, value);
+        lastSendTime[id] = now;
+      }
+      clearTimeout(window['servoTimer'+id]);
+      window['servoTimer'+id] = setTimeout(() => { sendServoCommand(id, value); }, 60);
+    }
+
+    function sendServoCommand(id, value) {
+      fetch(`/manual/servo?id=${id}&pos=${value}`).catch(err => showToast("Failed to move servo"));
+    }
+    
+    function saveGPS(point) {
+      let lat = document.getElementById("lat"+point).value;
+      let lon = document.getElementById("lon"+point).value;
+      if(!lat || !lon) { showToast("Please enter both coordinates"); return; }
+      fetch(`/gps?point=${point}&lat=${lat}&lon=${lon}`)
+        .then(() => showToast(`Waypoint ${point} Saved!`))
+        .catch(err => showToast("Error saving waypoint"));
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById("toast");
+      toast.innerText = msg;
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 3000);
+    }
+  </script>
+</body>
+</html>
+)rawliteral";
+
+
+// ===========================
+// Camera Stream Handler (Port 81)
+// ===========================
+#define PART_BOUNDARY "123456789000000000000987654321"
+static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
+static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
+static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+static esp_err_t stream_handler(httpd_req_t *req) {
+  camera_fb_t * fb = NULL;
+  esp_err_t res = ESP_OK;
+  size_t _jpg_buf_len = 0;
+  uint8_t * _jpg_buf = NULL;
+  char * part_buf[64];
+
+  res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
+  if(res != ESP_OK) return res;
+
+  while(true){
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("Camera capture failed");
+      res = ESP_FAIL;
+    } else {
+      _jpg_buf_len = fb->len;
+      _jpg_buf = fb->buf;
+    }
+    if(res == ESP_OK){
+      size_t hlen = snprintf((char *)part_buf, 64, _STREAM_PART, _jpg_buf_len);
+      res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
+    }
+    if(res == ESP_OK){
+      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
+    }
+    if(res == ESP_OK){
+      res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+    }
+    if(fb){
+      esp_camera_fb_return(fb);
+      fb = NULL;
+      _jpg_buf = NULL;
+    } else if(_jpg_buf){
+      free(_jpg_buf);
+      _jpg_buf = NULL;
+    }
+    if(res != ESP_OK){
+      break;
+    }
+  }
+  return res;
+}
+
+void startStreamServer() {
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.server_port = 81;
+  config.ctrl_port = 81;
+  
+  httpd_uri_t stream_uri = {
+    .uri       = "/stream",
+    .method    = HTTP_GET,
+    .handler   = stream_handler,
+    .user_ctx  = NULL
+  };
+  
+  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &stream_uri);
+  }
+}
+
+// ===========================
+// Setup and API Routes
+// ===========================
+#define TXD1 19
+#define RXD1 21
+
+// Use Serial1 for UART communication
+HardwareSerial mySerial(1);
+
+void setup() {
+  Serial.begin(115200);
+  mySerial.begin(115200, SERIAL_8N1, RXD1, TXD1);  // UART setup
+  Serial.println("ESP32 UART Transmitter");
+  Serial.setDebugOutput(true);
+  Serial.println();
+
+  // --- Camera Init Code ---
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.frame_size = FRAMESIZE_UXGA;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
+
+  if (psramFound()) {
+    config.jpeg_quality = 10;
+    config.fb_count = 2;
+    config.grab_mode = CAMERA_GRAB_LATEST;
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.fb_location = CAMERA_FB_IN_DRAM;
+  }
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+
+  sensor_t *s = esp_camera_sensor_get();
+  if (s->id.PID == OV3660_PID) {
+    s->set_vflip(s, 1);
+    s->set_brightness(s, 1);
+    s->set_saturation(s, -2);
+  }
+  s->set_framesize(s, FRAMESIZE_QVGA); // Good for smooth streaming
+
+  // --- WiFi Init (ACCESS POINT MODE) ---
+  Serial.println("Starting WiFi Hotspot...");
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("Hotspot Started! Connect to WiFi: ");
+  Serial.println(ssid);
+
+  // --- Start Video Stream Server (Port 81) ---
+  startStreamServer();
+
+  // --- Setup Control Server (Port 80) ---
+  server.on("/", HTTP_GET, []() {
+    Serial.println("CMD: server on");
+    server.send(200, "text/html", index_html);
+  });
+  
+  // Updated Mode Selection Endpoints
+  server.on("/manual", HTTP_GET, []() { Serial.println("CMD: Manual Mode Selected"); mySerial.println(String("M"));  server.send(200, "text/plain", "OK"); });
+  server.on("/auto", HTTP_GET, []() { Serial.println("CMD: Automatic Mode Selected"); mySerial.println(String("A"));  server.send(200, "text/plain", "OK");});
+  
+  // Chassis Endpoints
+  server.on("/manual/forward", HTTP_GET, []() { Serial.println("CMD: Forward"); mySerial.println(String("F")); server.send(200, "text/plain", "OK"); });
+  server.on("/manual/backward", HTTP_GET, []() { Serial.println("CMD: Backward");mySerial.println(String("B")); server.send(200, "text/plain", "OK"); });
+  server.on("/manual/left", HTTP_GET, []() { Serial.println("CMD: Left"); mySerial.println(String("L")); server.send(200, "text/plain", "OK"); });
+  server.on("/manual/right", HTTP_GET, []() { Serial.println("CMD: Right");mySerial.println(String("R")); server.send(200, "text/plain", "OK"); });
+  server.on("/manual/stop", HTTP_GET, []() { Serial.println("CMD: Stop Motors"); mySerial.println(String("S")); server.send(200, "text/plain", "OK"); });
+
+  // Auto Endpoints
+  server.on("/auto/start", HTTP_GET, []() { Serial.println("CMD: Auto Start"); mySerial.println(String("Y")); server.send(200, "text/plain", "OK"); });
+  server.on("/auto/stop", HTTP_GET, []() { Serial.println("CMD: Auto Stop"); mySerial.println(String("Z")); server.send(200, "text/plain", "OK"); });
+  server.on("/auto/reset", HTTP_GET, []() { Serial.println("CMD: Auto Reset"); mySerial.println(String("X")); server.send(200, "text/plain", "OK"); });
+  
+  server.on("/auto/test", HTTP_GET, []() { 
+    Serial.println("CMD: Test Button Pressed"); 
+    mySerial.println("T"); 
+    server.send(200, "text/plain", "OK"); 
+  });
+  
+  // Metal Detector Endpoint 
+  server.on("/start-scan", HTTP_GET, []() { 
+    Serial.println("CMD: Start Metal Scan"); 
+    mySerial.println(String("SCAN")); 
+    server.send(200, "text/plain", "OK"); 
+  });
+
+  // Servo Endpoint (Dynamic)
+  server.on("/manual/servo", HTTP_GET, []() {
+    if (server.hasArg("id") && server.hasArg("pos")) {
+      String servoId = server.arg("id");
+      String position = server.arg("pos");
+      Serial.printf("CMD: Move Servo %s to %s degrees\n", servoId.c_str(), position.c_str());
+        String uartCommand = "S" + servoId + ":" + position;
+        mySerial.println(String(uartCommand));
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  // GPS Endpoint
+  server.on("/gps", HTTP_GET, []() {
+    if (server.hasArg("point") && server.hasArg("lat") && server.hasArg("lon")) {
+      String pt = server.arg("point");
+      String lat = server.arg("lat");
+      String lon = server.arg("lon");
+      Serial.printf("GPS: Saved Point %s -> Lat: %s, Lon: %s\n", pt.c_str(), lat.c_str(), lon.c_str());
+      String uartCommand = "G" + pt + ":" + lat + "," + lon;
+      mySerial.println(String(uartCommand));
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.begin();
+
+  Serial.println("===============================");
+  Serial.print("Dashboard Ready! Open this IP in your browser: http://");
+  Serial.println(IP); // Use softAPIP variable here
+  Serial.println("===============================");
+}
+
+void loop() {
+  server.handleClient();
+}
