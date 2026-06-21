@@ -337,7 +337,8 @@ to access the dashboard.
 
 **Muhammad Zulqarnain**
 
-Robotics Engineer | IoT Developer | ESP32 Enthusiast
+BS Intelligent Systems and Robotics 
+
 
 Areas of Interest:
 
